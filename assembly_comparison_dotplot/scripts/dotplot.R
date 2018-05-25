@@ -4,10 +4,31 @@ require(doBy)
 
 
 f = snakemake@input[[1]]
+params <- snakemake@params
+# print(params)
+# print(names(params))
+
 coords = read.table(f, sep = '\t', comment.char = '', quote = '', skip = 4)
 colnames(coords) = c('Start.Query', 'End.Query', 'Start.Ref', 'End.Ref', 'Length.Query', 'Length.Ref', 'Identity', 'Query', 'Ref')
 
-coords = coords[coords$Length.Query > 5000,]
+# setup some parameters with defaults
+if ('min_ctg_length'  %in% names(params)){
+	filter.length <- params[['min_ctg_length']]
+} else {
+	filter.length <- 5000
+}
+if (params[['asm_title']] != ''){
+	ytitle <- paste(params[['asm_title']], 'Assembly (Mb)')
+} else{
+	ytitle <- 'Athena Assembly (Mb)'
+}
+if (params[['ref_title']] != ''){
+	xtitle <- paste(params[['ref_title']], 'Assembly (Mb)')
+} else{
+	xtitle <- 'Reference Assembly (Mb)'
+}
+
+coords = coords[coords$Length.Query > filter.length,]
 
 #reverse all QUERIES that have mostly reverse-oriented hits in order to clarify layout
 orientations = unique(data.frame(paste(coords$Query), sapply(coords$Query, function(x) sum((coords$Start.Query < coords$End.Query & coords$Start.Ref < coords$End.Ref)[coords$Query == x])/sum(coords$Query == x))))
@@ -84,7 +105,8 @@ alt.color.brewer = brewer_pal(palette = 'Set1', type = 'seq')
 alt.colors = alt.color.brewer(9)
 dotplot.colors = dotplot.color.brewer(12)
 dotplot.colors[2] = alt.colors[2] #get rid of light yellow
-dotplot.colors = c(dotplot.colors, alt.colors, dotplot.colors, alt.colors)
+# repeat these a few times...
+dotplot.colors = rep(c(dotplot.colors, alt.colors), times=20)
 
 ggplot(toplot, aes(x = Ref, y = Query, group = Line.Seg, colour = Query.Name)) +
 	geom_path(size = 0.7) +
@@ -92,8 +114,8 @@ ggplot(toplot, aes(x = Ref, y = Query, group = Line.Seg, colour = Query.Name)) +
 	scale_y_continuous(expand=c(0,0), breaks = seq(0, 20e6, 1e6), labels = paste(seq(0, 20, 1), '', sep = '')) +
 	scale_color_manual(values = dotplot.colors) +
 	theme(legend.position="none") +
-	xlab('Reference Assembly (Mb)') +
-	ylab('Athena Assembly (Mb)') +
+	xlab(xtitle) +
+	ylab(ytitle) +
 	theme(panel.spacing = grid::unit(0.75, "mm"),
 				panel.background = element_blank(),
 				panel.grid.major = element_line(colour = "grey",size=0.5, linetype = 'dotted'),

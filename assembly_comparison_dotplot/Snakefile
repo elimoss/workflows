@@ -3,6 +3,12 @@ import os
 asm_name = os.path.splitext(os.path.basename(config['assembly']))[0]
 ref_name = os.path.splitext(os.path.basename(config['reference']))[0]
 output = expand("{r}__{a}",r = ref_name, a = asm_name)
+if 'asm_title' in config:
+	asm_title = config['asm_title']
+else: asm_title=''
+if 'ref_title' in config:
+	ref_title = config['ref_title']
+else: ref_title=''
 
 rule all:
 	input:
@@ -33,5 +39,9 @@ rule postprocess:
 rule dotplot:
 	conda: "envs/mgwf.yaml"
 	input: rules.postprocess.output
+	params: 
+		min_ctg_length=5000,
+		asm_title=asm_title,
+		ref_title=ref_title 
 	output:	"dotplot/{id}.pdf"
 	script: "scripts/dotplot.R"
