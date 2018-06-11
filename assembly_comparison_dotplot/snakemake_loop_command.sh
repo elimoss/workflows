@@ -7,4 +7,4 @@ set -f
 # column 2 is location of athena assembly
 # column 3 is title for reference assembly
 # column 4 is title for athena assembly
-for i in $(cat config_multi.txt); do snakemake --config reference=$(echo "$i"|cut -f 1) assembly=$(echo "$i"|cut -f 2) ref_title=$(echo "$i"|cut -f 3) asm_title=$(echo "$i"|cut -f 4); done 
+cat config_multi.txt | xargs -n 4 bash -c 'snakemake --config reference=$0 assembly=$1 ref_title=$2  asm_title=$3'
