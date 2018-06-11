@@ -1,0 +1,7 @@
+assembly: '/ifs/scratch/bsiranos/britton_10x/britton_10x_A2/outs/athena/results/olc/athena.asm.fa'
+sample: 'britton_10x_A2_athena'
+reads1: '/ifs/scratch/bsiranos/britton_10x/britton_10x_A2/outs/adapter_trimmed/barcoded_1.fastq'
+reads2: '/ifs/scratch/bsiranos/britton_10x/britton_10x_A2/outs/adapter_trimmed/barcoded_2.fastq'
+krakendb: '/srv/gsfs0/projects/bhatt/data/program_indices/kraken/kraken_custom/'
+read_length: 150
+
