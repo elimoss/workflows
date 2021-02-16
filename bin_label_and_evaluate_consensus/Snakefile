@@ -1,0 +1,897 @@
+#!/usr/bin/env python
+configfile: "config.yaml"
+
+localrules: bwa_index_setup, postprocess_raw, postprocess_final, label_bins
+
+samp = config['sample']
+if 'reads2' in config:
+    reads = [config['reads1'], config['reads2']]
+else:
+    reads = config['reads1']
+
+rule all:
+    input:
+        reads,
+        config['assembly'],
+        config['krakendb'],
+        expand("{samp}/DAS_Tool/final/{samp}.tsv", samp = config['sample']),
+        
+        # additional binning methods: maxbin, concoct, mycc
+        expand("{samp}/maxbin/maxbin.summary", samp = config['sample']),
+        expand("{samp}/concoct/output/clustering_gt1000.csv", samp = config['sample']),
+        expand("{samp}/concoct/eval/cluster_plot.pdf", samp = config['sample']),
+        expand("{samp}/mycc/Cluster.summary", samp = config['sample']),
+
+        # checkm for each binning method
+        expand("{samp}/metabat_checkm/checkm.tsv", samp = config['sample']),
+        expand("{samp}/maxbin_checkm/checkm.tsv", samp = config['sample']),
+        expand("{samp}/concoct_checkm/checkm.tsv", samp = config['sample']),
+        expand("{samp}/mycc_checkm/checkm.tsv", samp = config['sample']),
+        expand("{samp}/DAS_Tool_checkm/checkm.tsv", samp = config['sample']),
+
+        # refinem for each binning method
+        # expand("{samp}/metabat_refinem/ssu/ssu_erroneous.tsv", samp = config['sample']),
+        # expand("{samp}/concoct_refinem/ssu/ssu_erroneous.tsv", samp = config['sample']),
+        # expand("{samp}/maxbin_refinem/ssu/ssu_erroneous.tsv", samp = config['sample']),
+        # expand("{samp}/mycc_refinem/ssu/ssu_erroneous.tsv", samp = config['sample']),
+        expand("{samp}/DAS_Tool_refinem/ssu/ssu_erroneous.tsv", samp = config['sample'])
+
+
+rule bwa_index_setup:
+    input:
+        config['assembly']
+    output:
+        "{samp}/idx/{samp}.fa"
+    resources:
+        mem=1,
+        time=1
+    threads: 1
+    params:
+        asm = config['assembly']
+    shell:
+        "cp {params.asm} {samp}/idx/{samp}.fa"
+
+
+rule bwa_index:
+    input:
+        "{samp}/idx/{samp}.fa"
+    output:
+        "{samp}/idx/{samp}.fa.amb",
+        "{samp}/idx/{samp}.fa.ann",
+        "{samp}/idx/{samp}.fa.bwt",
+        "{samp}/idx/{samp}.fa.pac",
+        "{samp}/idx/{samp}.fa.sa"
+    log:
+        "{samp}/logs/bwa_index.log"
+    resources:
+        mem=8,
+        time=2
+    threads: 1
+    shell: "bwa index {input}"
+
+rule bwa_align:
+    input:
+        "{samp}/idx/{samp}.fa",
+        reads,
+        "{samp}/idx/{samp}.fa.amb",
+        "{samp}/idx/{samp}.fa.ann",
+        "{samp}/idx/{samp}.fa.bwt",
+        "{samp}/idx/{samp}.fa.pac",
+        "{samp}/idx/{samp}.fa.sa"
+    log:
+        "{samp}/logs/bwa_mem.log"
+    output:
+        "{samp}/{samp}.bam"
+    resources:
+        mem=16,
+        time=12
+    threads: 8
+    shell:
+        "bwa mem -t {threads}" + " {input[0]} {input[1]} | samtools sort --threads {threads}" + " > {output}"
+
+rule bam_idx:
+    input:
+        "{samp}/{samp}.bam"
+    output:
+        "{samp}/{samp}.bam.bai"
+    log:
+        "{samp}/logs/bamidx.log"
+    resources:
+        mem=2,
+        time=2
+    shell:
+        "samtools index {input}"
+
+rule bam_idxstats:
+    input:
+        "{samp}/{samp}.bam",
+        "{samp}/{samp}.bam.bai"
+    output:
+        "{samp}/{samp}.bam.bai.tsv"
+    log:
+        "{samp}/logs/bamidx.log"
+    resources:
+        mem=2,
+        time=2
+    shell:
+        "samtools idxstats {input} > {output}"
+
+
+
+rule kraken:
+    input:
+        "{samp}/idx/{samp}.fa"
+    output:
+        "{samp}/classify/{samp}.krak"
+    log:
+        "{samp}/logs/kraken.log"
+    resources:
+        mem=100,
+        time=6
+    threads: 6
+    shell:
+        "kraken --db {krak} ".format(krak = config['krakendb']) +
+        " --fasta-input {input} --output {output} --preload --threads {threads}"
+
+rule kraken_translate:
+    input:
+        "{samp}/classify/{samp}.krak"
+    output:
+        "{samp}/classify/{samp}.tsv"
+    log:
+        "{samp}/logs/kraken.log"
+    resources:
+        mem=8,
+        time=1
+    shell:
+        "kraken-translate {input} --mpa-format " +
+        "--db {krak} ".format(krak=config['krakendb']) +
+        "> {output}"
+
+################################################
+############### BINNING  METHODS ###############
+################################################
+
+rule metabat:
+    input:
+        "{samp}/idx/{samp}.fa",
+        "{samp}/{samp}.bam"
+    output:
+        #the number of bins is unknown prior to execution, hence 'dynamic'
+        "{samp}/metabat/bins/"
+    log:
+        "{samp}/logs/metabat.log"
+    resources:
+        mem=64,
+        time=24
+    threads: 16
+    shell:
+        """
+        mkdir -p {samp}/metabat/bins
+        runMetaBat.sh --seed 1 -t {threads} --unbinned {input}
+        mv {samp}.fa.metabat-bins--unbinned/* {samp}/metabat/bins/
+        rmdir {samp}.fa.metabat-bins--unbinned/
+        mv {samp}.fa.depth.txt {samp}/
+        """
+
+rule maxbin:
+    input:
+        contigs=config['assembly'],
+        reads1=reads[0],
+        reads2=reads[1]
+    output:
+        outfolder="{samp}/maxbin/",
+        summary="{samp}/maxbin/maxbin.summary"
+    resources:
+        ntasks=32
+    shell:
+        """
+        cd {output.outfolder}
+        MAXBIN=/home/bsiranos/software/MaxBin-2.2.5
+        $MAXBIN/run_MaxBin.pl -contig {input.contigs} -out maxbin \
+        -reads1 {input.reads1} -reads2 {input.reads2} -thread {resources.ntasks}
+        # mv maxbin.* {output.outfolder}
+        """
+
+rule mycc:
+    input: 
+        contigs=config['assembly'],
+    output:
+        "{samp}/mycc/",
+        "{samp}/mycc/Cluster.summary"
+    shell:
+        """
+        MyCC=/home/bsiranos/software/MyCC
+        cd {samp}
+        python $MyCC/MyCC.py {input.contigs} -meta -keep
+        """
+        
+rule concoct:
+    input:
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+    output:
+        outfolder="{samp}/concoct/output/",
+        input_table="{samp}/concoct/concoct_inputtable.tsv",
+        input_tableR="{samp}/concoct/concoct_inputtableR.tsv",
+        # linkage_table="{samp}/concoct/concoct_linkage.tsv",
+        clustering="{samp}/concoct/output/clustering_gt1000.csv",
+        pca="{samp}/concoct/output/PCA_transformed_data_gt1000.csv",
+        pca_means="{samp}/concoct/output/pca_means_gt1000.csv",
+        bins_folder="{samp}/concoct/output/bins/",
+        # bins=dynamic("{samp}/concoct/output/bins/{bin}.fa")
+    resources:
+        ntasks=32
+    params:
+        read_length = config['read_length'],
+        guess_clusters=40
+    shell:
+        """
+        CONCOCT=/home/bsiranos/software/CONCOCT
+        python $CONCOCT/scripts/gen_input_table.py {input.contigs} {input.mapping} \
+        > {output.input_table}
+        
+
+        # Parse the input table to just contain the mean coverage for each contig in each sample:
+        cut -f1,3- {output.input_table} > {output.input_tableR}
+        # Run concoct with the maximum number of cluster that we guess is appropriate for this data set:
+        concoct -c {params.guess_clusters} --coverage_file {output.input_tableR} \
+        --composition_file {input.contigs} -b {output.outfolder}
+        # extract to bins
+        python $CONCOCT/scripts/extract_fasta_bins.py {input.contigs} {output.clustering} --output_path {output.bins_folder}
+
+        """
+        # dont do linkage table for now
+        # python $CONCOCT/scripts/bam_to_linkage.py --regionlength 500 \
+        # --fullsearch --readlength {params.read_length} {input.contigs} {input.mapping} \
+        # > {output.linkage_table}
+
+rule concoct_evaluate:
+    input:
+        clustering="{samp}/concoct/output/clustering_gt1000.csv",
+        pca="{samp}/concoct/output/PCA_transformed_data_gt1000.csv",
+        pca_means="{samp}/concoct/output/pca_means_gt1000.csv"
+    output:
+        "{samp}/concoct/eval/cluster_plot.pdf"
+    shell:
+        """
+        CONCOCT=/home/bsiranos/software/CONCOCT
+        Rscript $CONCOCT/scripts/ClusterPlot.R -c {input.clustering} \
+        -p {input.pca} -m {input.pca_means} -r {samp}/concoct/output/pca_variances_gt1000_dim \
+        -l -o {output}
+        """
+
+rule DAS_Tool:
+    input:
+        rules.metabat.output,
+        rules.maxbin.output,
+        rules.mycc.output,
+        rules.concoct.output
+    output:
+        # "{samp}/DAS_Tool/fourmethods_DASTool_summary.txt",  
+        dynamic("{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa") 
+
+    resources:
+        ntasks=16
+    shell:
+        """
+        module load usearch
+        DASTOOL=/home/bsiranos/software/DAS_Tool
+        # perpare scaffold2bin file for each 
+        mkdir -p {wildcards.samp}/DAS_Tool
+        $DASTOOL/src/Fasta_to_Scaffolds2Bin.sh -e fa -i {wildcards.samp}/metabat/bins/ > {wildcards.samp}/DAS_Tool/metabat_scaffold2bin.tsv
+        $DASTOOL/src/Fasta_to_Scaffolds2Bin.sh -i {wildcards.samp}/maxbin/ > {wildcards.samp}/DAS_Tool/maxbin_scaffold2bin.tsv
+        $DASTOOL/src/Fasta_to_Scaffolds2Bin.sh -i {wildcards.samp}/mycc > {wildcards.samp}/DAS_Tool/mycc_scaffold2bin.tsv
+        sed 's/,/\t/g' {wildcards.samp}/concoct/output/clustering_gt1000.csv > {wildcards.samp}/DAS_Tool/concoct_scaffold2bin.tsv
+
+
+        $DASTOOL/DAS_Tool -i {wildcards.samp}/DAS_Tool/metabat_scaffold2bin.tsv,{wildcards.samp}/DAS_Tool/maxbin_scaffold2bin.tsv,{wildcards.samp}/DAS_Tool/mycc_scaffold2bin.tsv,{wildcards.samp}/DAS_Tool/concoct_scaffold2bin.tsv -l metabat,maxbin,mycc,concoct -c {wildcards.samp}/idx/{samp}.fa -o {wildcards.samp}/DAS_Tool/fourmethods --threads {resources.ntasks} --write_bins 1
+        """
+        
+
+################################################
+################ CHECKM  BLOCKS ################
+################################################
+rule checkm_metabat:
+    input:
+        rules.metabat.output
+    output:
+        "{samp}/metabat_checkm/checkm.tsv"
+    log:
+        "{samp}/logs/checkm.log"
+    resources:
+        mem=128,
+        time=24,
+        ntasks=16 
+    params:
+        bin_folder="{samp}/metabat/bins/",
+        out_folder="{samp}/metabat_checkm/",
+        bin_ex=".fa"
+    shell:
+        """
+        outdir={params.out_folder}
+        if [ -d $outdir ]; then rm -r $outdir; fi
+
+        checkm tree --threads {resources.ntasks} {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm tree_qa {params.out_folder}
+        checkm lineage_set {params.out_folder} {params.out_folder}/lineage.ms
+        checkm analyze  {params.out_folder}/lineage.ms {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm qa {params.out_folder}/lineage.ms {params.out_folder} -f {params.out_folder}/checkm.tsv --tab_table
+        """
+
+rule checkm_maxbin:
+    input:
+        dynamic(rules.maxbin.output)
+    output:
+        "{samp}/maxbin_checkm/checkm.tsv"
+    resources:
+        mem=128,
+        time=24,
+        ntasks=16 
+    params:
+        bin_folder="{samp}/maxbin/",
+        out_folder="{samp}/maxbin_checkm/",
+        bin_ex=".fasta"
+    shell:
+        """
+        outdir={params.out_folder}
+        if [ -d $outdir ]; then rm -r $outdir; fi
+
+        checkm tree --threads {resources.ntasks} {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm tree_qa {params.out_folder}
+        checkm lineage_set {params.out_folder} {params.out_folder}/lineage.ms
+        checkm analyze  {params.out_folder}/lineage.ms {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm qa {params.out_folder}/lineage.ms {params.out_folder} -f {params.out_folder}/checkm.tsv --tab_table
+        """
+
+rule checkm_concoct:
+    input:
+        dynamic(rules.concoct.output)
+    output:
+        "{samp}/concoct_checkm/checkm.tsv"
+    resources:
+        mem=128,
+        time=24,
+        ntasks=16
+    params:
+        bin_folder="{samp}/concoct/output/bins/",
+        out_folder="{samp}/concoct_checkm/",
+        bin_ex=".fa" 
+    shell:
+        """
+        outdir={params.out_folder}
+        if [ -d $outdir ]; then rm -r $outdir; fi
+
+        checkm tree --threads {resources.ntasks} {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm tree_qa {params.out_folder}
+        checkm lineage_set {params.out_folder} {params.out_folder}/lineage.ms
+        checkm analyze  {params.out_folder}/lineage.ms {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm qa {params.out_folder}/lineage.ms {params.out_folder} -f {params.out_folder}/checkm.tsv --tab_table
+        """
+
+rule checkm_mycc:
+    input:
+        dynamic(rules.mycc.output)
+    output:
+        "{samp}/mycc_checkm/checkm.tsv"
+    resources:
+        mem=128,
+        time=24,
+        ntasks=16
+    params:
+        bin_folder="{samp}/mycc/",
+        out_folder="{samp}/mycc_checkm/",
+        bin_ex=".fasta" 
+    shell:
+        """
+        outdir={params.out_folder}
+        if [ -d $outdir ]; then rm -r $outdir; fi
+
+        checkm tree --threads {resources.ntasks} {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm tree_qa {params.out_folder}
+        checkm lineage_set {params.out_folder} {params.out_folder}/lineage.ms
+        checkm analyze  {params.out_folder}/lineage.ms {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm qa {params.out_folder}/lineage.ms {params.out_folder} -f {params.out_folder}/checkm.tsv --tab_table
+        """
+
+rule checkm_DAS_Tool:
+    input:
+        dynamic(rules.DAS_Tool.output)
+    output:
+        "{samp}/DAS_Tool_checkm/checkm.tsv"
+    resources:
+        mem=128,
+        time=24,
+        ntasks=16
+    params:
+        bin_folder="{samp}/DAS_Tool/fourmethods_DASTool_bins/",
+        out_folder="{samp}/DAS_Tool_checkm/",
+        bin_ex=".fa"
+    shell:
+        """
+        outdir={params.out_folder}
+        if [ -d $outdir ]; then rm -r $outdir; fi
+
+        checkm tree --threads {resources.ntasks} {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm tree_qa {params.out_folder}
+        checkm lineage_set {params.out_folder} {params.out_folder}/lineage.ms
+        checkm analyze  {params.out_folder}/lineage.ms {params.bin_folder} {params.out_folder} -x {params.bin_ex}
+        checkm qa {params.out_folder}/lineage.ms {params.out_folder} -f {params.out_folder}/checkm.tsv --tab_table
+        """
+
+
+################################################
+################ REFINEM BLOCKS ################
+################################################
+rule refinem_concoct:
+    input:
+        bins_folder="{samp}/concoct/output/bins/",
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+
+    output:
+        scaffold_stats_folder="{samp}/concoct_refinem/scaffold_stats/",
+        scaffold_stats="{samp}/concoct_refinem/scaffold_stats/scaffold_stats.tsv",
+        outliers_folder="{samp}/concoct_refinem/outliers/",
+        outliers="{samp}/concoct_refinem/outliers/outliers.tsv",
+        bins_filtered_genomic_folder="{samp}/concoct_refinem/bins_filtered_genomic/",
+        called_genes_folder="{samp}/concoct_refinem/called_genes/",
+        called_genes_filtered_folder="{samp}/concoct_refinem/called_genes_filtered/",
+        taxon_profile_folder="{samp}/concoct_refinem/taxon_profile",
+        taxon_filter="{samp}/concoct_refinem/taxon_profile/taxon_filter.tsv",
+        bins_filtered_taxonomic_folder="{samp}/concoct_refinem/bins_filtered_taxonomic/",
+        ssu_folder="{samp}/concoct_refinem/ssu/",
+        ssu_erroneous="{samp}/concoct_refinem/ssu/ssu_erroneous.tsv",
+        bins_filtered_ssu_folder="{samp}/concoct_refinem/bins_filtered_ssu/",
+    params:
+        bin_ex=".fa"
+    resources:
+        ntasks=32
+    shell:
+        """
+        REFDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_protein_db.2017-11-09.faa
+        SSUDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_ssu_db.2018-01-18.fna
+        REFTAXONOMY=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_taxonomy.2017-12-15.tsv
+        
+        # scaffold stats
+        refinem scaffold_stats -c {resources.ntasks} {input.contigs} {input.bins_folder} \
+            {output.scaffold_stats_folder} {input.mapping} -x {params.bin_ex}
+        # filter outliers with divergent scaffold stats
+        refinem outliers {output.scaffold_stats} {output.outliers_folder} --no_plots
+        refinem filter_bins {input.bins_folder} {output.outliers} \
+            {output.bins_filtered_genomic_folder} -x {params.bin_ex}
+        
+        # call genes on unfiltered bins - can also use filtered here
+        refinem call_genes -c {resources.ntasks} {input.bins_folder} {output.called_genes_folder} -x {params.bin_ex}
+        # on filtered by genomic outliers 
+        refinem call_genes -c {resources.ntasks} {output.bins_filtered_genomic_folder} \
+            {output.called_genes_filtered_folder} -x {params.bin_ex}
+        
+        # Generate taxonomic profile of genes across scaffolds within a genome
+        # initially using the unfiltered contigs
+        refinem taxon_profile -c {resources.ntasks} {output.called_genes_folder} \
+        {output.scaffold_stats} $REFDB $REFTAXONOMY {output.taxon_profile_folder}
+        # Identify scaffolds with divergent taxonomic classification
+        refinem taxon_filter -c {resources.ntasks} {output.taxon_profile_folder} {output.taxon_filter}
+        # filter by taxoniomic classification        
+        refinem filter_bins {input.bins_folder} {output.taxon_filter} {output.bins_filtered_taxonomic_folder} -x {params.bin_ex}
+        
+        # Identify scaffolds with erroneous 16S rRNA genes
+        refinem ssu_erroneous {input.bins_folder} {output.taxon_profile_folder} \
+            $SSUDB $REFTAXONOMY {output.ssu_folder} -x {params.bin_ex}
+        # filter by erroneous 16S rRNA genes
+        refinem filter_bins {input.bins_folder} {output.ssu_erroneous} \
+            {output.bins_filtered_ssu_folder} -x {params.bin_ex}
+        """
+
+rule refinem_metabat:
+    input:
+        bins_folder="{samp}/bins/",
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+
+    output:
+        scaffold_stats_folder="{samp}/metabat_refinem/scaffold_stats/",
+        scaffold_stats="{samp}/metabat_refinem/scaffold_stats/scaffold_stats.tsv",
+        outliers_folder="{samp}/metabat_refinem/outliers/",
+        outliers="{samp}/metabat_refinem/outliers/outliers.tsv",
+        bins_filtered_genomic_folder="{samp}/metabat_refinem/bins_filtered_genomic/",
+        called_genes_folder="{samp}/metabat_refinem/called_genes/",
+        called_genes_filtered_folder="{samp}/metabat_refinem/called_genes_filtered/",
+        taxon_profile_folder="{samp}/metabat_refinem/taxon_profile",
+        taxon_filter="{samp}/metabat_refinem/taxon_profile/taxon_filter.tsv",
+        bins_filtered_taxonomic_folder="{samp}/metabat_refinem/bins_filtered_taxonomic/",
+        ssu_folder="{samp}/metabat_refinem/ssu/",
+        ssu_erroneous="{samp}/metabat_refinem/ssu/ssu_erroneous.tsv",
+        bins_filtered_ssu_folder="{samp}/metabat_refinem/bins_filtered_ssu/",
+    params:
+        bin_ex=".fa"
+    resources:
+        ntasks=32
+    shell:
+        """
+        REFDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_protein_db.2017-11-09.faa
+        SSUDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_ssu_db.2018-01-18.fna
+        REFTAXONOMY=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_taxonomy.2017-12-15.tsv
+        
+        # scaffold stats
+        refinem scaffold_stats -c {resources.ntasks} {input.contigs} {input.bins_folder} \
+            {output.scaffold_stats_folder} {input.mapping} -x {params.bin_ex}
+        # filter outliers with divergent scaffold stats
+        refinem outliers {output.scaffold_stats} {output.outliers_folder} --no_plots
+        refinem filter_bins {input.bins_folder} {output.outliers} \
+            {output.bins_filtered_genomic_folder} -x {params.bin_ex}
+        
+        # call genes on unfiltered bins - can also use filtered here
+        refinem call_genes -c {resources.ntasks} {input.bins_folder} {output.called_genes_folder} -x {params.bin_ex}
+        # on filtered by genomic outliers 
+        refinem call_genes -c {resources.ntasks} {output.bins_filtered_genomic_folder} \
+            {output.called_genes_filtered_folder} -x {params.bin_ex}
+        
+        # Generate taxonomic profile of genes across scaffolds within a genome
+        # initially using the unfiltered contigs
+        refinem taxon_profile -c {resources.ntasks} {output.called_genes_folder} \
+        {output.scaffold_stats} $REFDB $REFTAXONOMY {output.taxon_profile_folder}
+        # Identify scaffolds with divergent taxonomic classification
+        refinem taxon_filter -c {resources.ntasks} {output.taxon_profile_folder} {output.taxon_filter}
+        # filter by taxoniomic classification        
+        refinem filter_bins {input.bins_folder} {output.taxon_filter} {output.bins_filtered_taxonomic_folder} -x {params.bin_ex}
+        
+        # Identify scaffolds with erroneous 16S rRNA genes
+        refinem ssu_erroneous {input.bins_folder} {output.taxon_profile_folder} \
+            $SSUDB $REFTAXONOMY {output.ssu_folder} -x {params.bin_ex}
+        # filter by erroneous 16S rRNA genes
+        refinem filter_bins {input.bins_folder} {output.ssu_erroneous} \
+            {output.bins_filtered_ssu_folder} -x {params.bin_ex}
+        """
+
+rule refinem_maxbin:
+    input:
+        bins_folder="{samp}/maxbin/",
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+    output:
+        scaffold_stats_folder="{samp}/maxbin_refinem/scaffold_stats/",
+        scaffold_stats="{samp}/maxbin_refinem/scaffold_stats/scaffold_stats.tsv",
+        outliers_folder="{samp}/maxbin_refinem/outliers/",
+        outliers="{samp}/maxbin_refinem/outliers/outliers.tsv",
+        bins_filtered_genomic_folder="{samp}/maxbin_refinem/bins_filtered_genomic/",
+        called_genes_folder="{samp}/maxbin_refinem/called_genes/",
+        called_genes_filtered_folder="{samp}/maxbin_refinem/called_genes_filtered/",
+        taxon_profile_folder="{samp}/maxbin_refinem/taxon_profile",
+        taxon_filter="{samp}/maxbin_refinem/taxon_profile/taxon_filter.tsv",
+        bins_filtered_taxonomic_folder="{samp}/maxbin_refinem/bins_filtered_taxonomic/",
+        ssu_folder="{samp}/maxbin_refinem/ssu/",
+        ssu_erroneous="{samp}/maxbin_refinem/ssu/ssu_erroneous.tsv",
+        bins_filtered_ssu_folder="{samp}/maxbin_refinem/bins_filtered_ssu/",
+    params:
+        bin_ex=".fasta"
+    resources:
+        ntasks=32
+    shell:
+        """
+        REFDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_protein_db.2017-11-09.faa
+        SSUDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_ssu_db.2018-01-18.fna
+        REFTAXONOMY=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_taxonomy.2017-12-15.tsv
+        
+        # scaffold stats
+        refinem scaffold_stats -c {resources.ntasks} {input.contigs} {input.bins_folder} \
+            {output.scaffold_stats_folder} {input.mapping} -x {params.bin_ex}
+        # filter outliers with divergent scaffold stats
+        refinem outliers {output.scaffold_stats} {output.outliers_folder} --no_plots
+        refinem filter_bins {input.bins_folder} {output.outliers} \
+            {output.bins_filtered_genomic_folder} -x {params.bin_ex}
+        
+        # call genes on unfiltered bins - can also use filtered here
+        refinem call_genes -c {resources.ntasks} {input.bins_folder} {output.called_genes_folder} -x {params.bin_ex}
+        # on filtered by genomic outliers 
+        refinem call_genes -c {resources.ntasks} {output.bins_filtered_genomic_folder} \
+            {output.called_genes_filtered_folder} -x {params.bin_ex}
+        
+        # Generate taxonomic profile of genes across scaffolds within a genome
+        # initially using the unfiltered contigs
+        refinem taxon_profile -c {resources.ntasks} {output.called_genes_folder} \
+        {output.scaffold_stats} $REFDB $REFTAXONOMY {output.taxon_profile_folder}
+        # Identify scaffolds with divergent taxonomic classification
+        refinem taxon_filter -c {resources.ntasks} {output.taxon_profile_folder} {output.taxon_filter}
+        # filter by taxoniomic classification        
+        refinem filter_bins {input.bins_folder} {output.taxon_filter} {output.bins_filtered_taxonomic_folder} -x {params.bin_ex}
+        
+        # Identify scaffolds with erroneous 16S rRNA genes
+        refinem ssu_erroneous {input.bins_folder} {output.taxon_profile_folder} \
+            $SSUDB $REFTAXONOMY {output.ssu_folder} -x {params.bin_ex}
+        # filter by erroneous 16S rRNA genes
+        refinem filter_bins {input.bins_folder} {output.ssu_erroneous} \
+            {output.bins_filtered_ssu_folder} -x {params.bin_ex}
+        """
+
+rule refinem_mycc:
+    input:
+        bins_folder="{samp}/mycc/",
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+    output:
+        scaffold_stats_folder="{samp}/mycc_refinem/scaffold_stats/",
+        scaffold_stats="{samp}/mycc_refinem/scaffold_stats/scaffold_stats.tsv",
+        outliers_folder="{samp}/mycc_refinem/outliers/",
+        outliers="{samp}/mycc_refinem/outliers/outliers.tsv",
+        bins_filtered_genomic_folder="{samp}/mycc_refinem/bins_filtered_genomic/",
+        called_genes_folder="{samp}/mycc_refinem/called_genes/",
+        called_genes_filtered_folder="{samp}/mycc_refinem/called_genes_filtered/",
+        taxon_profile_folder="{samp}/mycc_refinem/taxon_profile",
+        taxon_filter="{samp}/mycc_refinem/taxon_profile/taxon_filter.tsv",
+        bins_filtered_taxonomic_folder="{samp}/mycc_refinem/bins_filtered_taxonomic/",
+        ssu_folder="{samp}/mycc_refinem/ssu/",
+        ssu_erroneous="{samp}/mycc_refinem/ssu/ssu_erroneous.tsv",
+        bins_filtered_ssu_folder="{samp}/mycc_refinem/bins_filtered_ssu/",
+    params:
+        bin_ex=".fasta"
+    resources:
+        ntasks=32
+    shell:
+        """
+        REFDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_protein_db.2017-11-09.faa
+        SSUDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_ssu_db.2018-01-18.fna
+        REFTAXONOMY=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_taxonomy.2017-12-15.tsv
+        
+        # scaffold stats
+        refinem scaffold_stats -c {resources.ntasks} {input.contigs} {input.bins_folder} \
+            {output.scaffold_stats_folder} {input.mapping} -x {params.bin_ex}
+        # filter outliers with divergent scaffold stats
+        refinem outliers {output.scaffold_stats} {output.outliers_folder} --no_plots
+        refinem filter_bins {input.bins_folder} {output.outliers} \
+            {output.bins_filtered_genomic_folder} -x {params.bin_ex}
+        
+        # call genes on unfiltered bins - can also use filtered here
+        refinem call_genes -c {resources.ntasks} {input.bins_folder} {output.called_genes_folder} -x {params.bin_ex}
+        # on filtered by genomic outliers 
+        refinem call_genes -c {resources.ntasks} {output.bins_filtered_genomic_folder} \
+            {output.called_genes_filtered_folder} -x {params.bin_ex}
+        
+        # Generate taxonomic profile of genes across scaffolds within a genome
+        # initially using the unfiltered contigs
+        refinem taxon_profile -c {resources.ntasks} {output.called_genes_folder} \
+        {output.scaffold_stats} $REFDB $REFTAXONOMY {output.taxon_profile_folder}
+        # Identify scaffolds with divergent taxonomic classification
+        refinem taxon_filter -c {resources.ntasks} {output.taxon_profile_folder} {output.taxon_filter}
+        # filter by taxoniomic classification        
+        refinem filter_bins {input.bins_folder} {output.taxon_filter} {output.bins_filtered_taxonomic_folder} -x {params.bin_ex}
+        
+        # Identify scaffolds with erroneous 16S rRNA genes
+        refinem ssu_erroneous {input.bins_folder} {output.taxon_profile_folder} \
+            $SSUDB $REFTAXONOMY {output.ssu_folder} -x {params.bin_ex}
+        # filter by erroneous 16S rRNA genes
+        refinem filter_bins {input.bins_folder} {output.ssu_erroneous} \
+            {output.bins_filtered_ssu_folder} -x {params.bin_ex}
+        """
+
+rule refinem_DAS_Tool:
+    input:
+        bins_folder="{samp}/DAS_Tool/fourmethods_DASTool_bins/",
+        contigs=config['assembly'],
+        mapping="{samp}/{samp}.bam"
+    output:
+        scaffold_stats_folder="{samp}/DAS_Tool_refinem/scaffold_stats/",
+        scaffold_stats="{samp}/DAS_Tool_refinem/scaffold_stats/scaffold_stats.tsv",
+        outliers_folder="{samp}/DAS_Tool_refinem/outliers/",
+        outliers="{samp}/DAS_Tool_refinem/outliers/outliers.tsv",
+        bins_filtered_genomic_folder="{samp}/DAS_Tool_refinem/bins_filtered_genomic/",
+        called_genes_folder="{samp}/DAS_Tool_refinem/called_genes/",
+        called_genes_filtered_folder="{samp}/DAS_Tool_refinem/called_genes_filtered/",
+        taxon_profile_folder="{samp}/DAS_Tool_refinem/taxon_profile",
+        taxon_filter="{samp}/DAS_Tool_refinem/taxon_profile/taxon_filter.tsv",
+        bins_filtered_taxonomic_folder="{samp}/DAS_Tool_refinem/bins_filtered_taxonomic/",
+        ssu_folder="{samp}/DAS_Tool_refinem/ssu/",
+        ssu_erroneous="{samp}/DAS_Tool_refinem/ssu/ssu_erroneous.tsv",
+        bins_filtered_ssu_folder="{samp}/DAS_Tool_refinem/bins_filtered_ssu/",
+    params:
+        bin_ex=".fa"
+    resources:
+        ntasks=32
+    shell:
+        """
+        REFDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_protein_db.2017-11-09.faa
+        SSUDB=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_ssu_db.2018-01-18.fna
+        REFTAXONOMY=/labs/asbhatt/bsiranos/refinem_db/gtdb_r80_taxonomy.2017-12-15.tsv
+        
+        # scaffold stats
+        refinem scaffold_stats -c {resources.ntasks} {input.contigs} {input.bins_folder} \
+            {output.scaffold_stats_folder} {input.mapping} -x {params.bin_ex}
+        # filter outliers with divergent scaffold stats
+        refinem outliers {output.scaffold_stats} {output.outliers_folder} --no_plots
+        refinem filter_bins {input.bins_folder} {output.outliers} \
+            {output.bins_filtered_genomic_folder} -x {params.bin_ex}
+        
+        # call genes on unfiltered bins - can also use filtered here
+        refinem call_genes -c {resources.ntasks} {input.bins_folder} {output.called_genes_folder} -x {params.bin_ex}
+        # on filtered by genomic outliers 
+        refinem call_genes -c {resources.ntasks} {output.bins_filtered_genomic_folder} \
+            {output.called_genes_filtered_folder} -x {params.bin_ex}
+        
+        # Generate taxonomic profile of genes across scaffolds within a genome
+        # initially using the unfiltered contigs
+        refinem taxon_profile -c {resources.ntasks} {output.called_genes_folder} \
+        {output.scaffold_stats} $REFDB $REFTAXONOMY {output.taxon_profile_folder}
+        # Identify scaffolds with divergent taxonomic classification
+        refinem taxon_filter -c {resources.ntasks} {output.taxon_profile_folder} {output.taxon_filter}
+        # filter by taxoniomic classification        
+        refinem filter_bins {input.bins_folder} {output.taxon_filter} {output.bins_filtered_taxonomic_folder} -x {params.bin_ex}
+        
+        # Identify scaffolds with erroneous 16S rRNA genes
+        refinem ssu_erroneous {input.bins_folder} {output.taxon_profile_folder} \
+            $SSUDB $REFTAXONOMY {output.ssu_folder} -x {params.bin_ex}
+        # filter by erroneous 16S rRNA genes
+        refinem filter_bins {input.bins_folder} {output.ssu_erroneous} \
+            {output.bins_filtered_ssu_folder} -x {params.bin_ex}
+        """
+
+################################################
+########## ANALYSIS OF  DAS_TOOL BINS ##########
+################################################
+rule fasta_index:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa"
+    output:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa.fai"
+    log:
+        "{samp}/logs/faidx.log"
+    resources:
+        mem=8,
+        time=1
+    threads: 16
+    shell:
+        "samtools faidx {input}"
+
+rule label_bins:
+    input:
+        "{samp}/classify/{samp}.tsv",
+        dynamic(rules.fasta_index.output)
+    output:
+        "{samp}/DAS_Tool/classify/bin_species_calls.tsv"
+    log:
+        "{samp}/logs/assign_species.log"
+    script:
+        "scripts/assign_species.py"
+
+rule aragorn:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa"
+    output:
+        "{samp}/DAS_Tool/rna/trna/{bin}.fa.txt"
+    log:
+        "{samp}/logs/aragorn.log"
+    resources:
+        mem=8,
+        time=1
+    shell:
+        "aragorn -t {input} -o {output}"
+
+rule barrnap:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa"
+    output:
+        "{samp}/DAS_Tool/rna/rrna/{bin}.fa.txt"
+    log:
+        "{samp}/logs/barrnap.log"
+    resources:
+        mem=8,
+        time=1
+    shell:
+        "barrnap {input} > {output}"
+
+rule quast:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa"
+    output:
+        "{samp}/DAS_Tool/quast/{bin}.fa"
+    log:
+        "{samp}/logs/quast.log"
+    resources:
+        mem=8,
+        time=1
+    shell:
+        "quast.py -o {output} {input} " +
+        "--contig-thresholds 0,10000,50000,100000,250000,500000,1000000,2000000,3000000 --fast "
+
+rule prokka:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa"
+    output:
+        "{samp}/DAS_Tool/prokka/{bin}.fa/{samp}_{bin}.fa.gff"
+    log:
+        "{samp}/logs/prokka.log"
+    resources:
+        mem=48,
+        time=1,
+    threads: 16
+    shell:
+        "prokka {input} --outdir {samp}/DAS_Tool/prokka/{wildcards.bin}.fa " +
+        "--prefix {samp}_{wildcards.bin}.fa --centre X --compliant --force --cpus {threads}"
+
+rule bin_idxstats:
+    input:
+        "{samp}/DAS_Tool/fourmethods_DASTool_bins/{bin}.fa",
+        "{samp}/{samp}.bam.bai.tsv"
+    output:
+        "{samp}/DAS_Tool/coverage/raw/{bin}.tsv"
+    log:
+        "{samp}/logs/coverage.log"
+    resources:
+        mem=2,
+        time=1
+    shell:
+        "grep '>' {input[0]} | tr -d '>' | xargs -I foo -n 1 grep -P 'foo\t' {input[1]} > {output}"
+
+rule bin_coverage:
+    input:
+        rules.bin_idxstats.output
+    output:
+        "{samp}/DAS_Tool/coverage/{bin}.txt"
+    log:
+        "{samp}/logs/coverage.log"
+    resources:
+        mem=2,
+        time=1
+    params:
+        read_length = config['read_length']
+    script:
+        "scripts/bin_coverage.py"
+
+################################################
+################ POSTPROCESSING ################
+################################################
+
+rule postprocess_raw:
+    input:
+        dynamic(rules.prokka.output),
+        dynamic(rules.quast.output),
+        rules.checkm_DAS_Tool.output,
+        dynamic(rules.aragorn.output),
+        dynamic(rules.barrnap.output),
+        dynamic(rules.bin_coverage.output),
+        rules.label_bins.output
+    output:
+        "{samp}/DAS_Tool/final/prokka.tmp",
+        "{samp}/DAS_Tool/final/quast.tmp",
+        "{samp}/DAS_Tool/final/checkm.tmp",
+        "{samp}/DAS_Tool/final/trna.tmp",
+        "{samp}/DAS_Tool/final/rrna.tmp",
+        "{samp}/DAS_Tool/final/classify.tmp",
+        "{samp}/DAS_Tool/final/coverage.tmp"
+    log:
+        "{samp}/logs/postprocess.log"
+    resources:
+        mem=2,
+        time=1
+    shell: #TODO: tuck this away into a shell script.
+        """
+        # coverage
+        (echo -e 'Sample\tBin\tCoverage'; cat {samp}/DAS_Tool/coverage/*.txt) > {samp}/DAS_Tool/final/coverage.tmp
+        # prokka
+        (echo -e 'Sample\tBin\tGenes'; find {samp}/DAS_Tool/prokka/ -name '*.gff' | xargs grep -c CDS | cut -f5 -d '/' | sed 's/.fa.gff:/\t/g' | sed 's/{samp}_/{samp}\t/g' | sort -k2,2g) > {samp}/DAS_Tool/final/prokka.tmp
+        # quast
+        find {samp}/DAS_Tool/quast/ -name 'transposed_report.tsv' | xargs head -qn1 | sort -u | sed 's/^Assembly/Sample\tBin/g' > {samp}/DAS_Tool/final/quast.tmp
+        find {samp}/DAS_Tool/quast/ -name 'transposed_report.tsv' | xargs tail -qn+2 | sort -u | sed 's/^/{samp}\t/g' >> {samp}/DAS_Tool/final/quast.tmp
+        # checkm
+        head -qn1 {samp}/DAS_Tool_checkm/checkm.tsv | sed 's/^Bin Id/Sample\tBin/g' > {samp}/DAS_Tool/final/checkm.tmp
+        tail -qn+2 {samp}/DAS_Tool_checkm/checkm.tsv | sed 's/^/{samp}\t/g' >> {samp}/DAS_Tool/final/checkm.tmp
+        # trna
+        (echo -e 'Sample\tBin\ttRNA'; grep Total {samp}/DAS_Tool/rna/trna/* | sed 's/\/rna\/trna\//\t/g' | sed 's/.fa.txt:Total tRNA genes = /\t/g') > {samp}/DAS_Tool/final/trna.tmp
+        #rrna
+        (echo -e 'Sample\tBin\trna.16S\trna.23S\trna.5S'; paste <(grep -c 16S {samp}/DAS_Tool/rna/rrna/* | sed 's/\/rna\/rrna\//\t/g' | sed 's/.fa.txt:/\t/g') \
+        <(grep -c 23S {samp}/DAS_Tool/rna/rrna/* | sed 's/\/rna\/rrna\//\t/g' | sed 's/.fa.txt:/\t/g' | cut -f4) \
+        <(grep -c 5S {samp}/DAS_Tool/rna/rrna/* | sed 's/\/rna\/rrna\//\t/g' | sed 's/.fa.txt:/\t/g' | cut -f4)) > {samp}/DAS_Tool/final/rrna.tmp
+        # classify
+        (echo -e 'Sample\tBin\tMajority.Class\tMajority.Fraction\tSize.Mb\tFinal.Class'; cat {samp}/DAS_Tool/classify/bin_species_calls.tsv | sed 's/\.fa//g' | sed 's/^/{samp}\t/g') > {samp}/DAS_Tool/final/classify.tmp
+        """
+        
+rule postprocess_final:
+    input:
+        rules.postprocess_raw.output
+    output:
+        "{samp}/DAS_Tool/final/{samp}.tsv"
+    log:
+        "{samp}/logs/postprocess.log"
+    script:
+        "scripts/join_final_tables.R"
+
